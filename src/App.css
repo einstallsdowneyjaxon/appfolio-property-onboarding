@@ -1,0 +1,296 @@
+.app-shell {
+  width: min(1040px, calc(100% - 40px));
+  margin: 0 auto;
+  padding: 56px 0;
+}
+
+.page-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 32px;
+  margin-bottom: 32px;
+}
+
+.eyebrow {
+  margin: 0 0 10px;
+  color: #3f6f5f;
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.page-header h1 {
+  margin: 0;
+  color: #15231f;
+  font-size: clamp(2.25rem, 5vw, 4.25rem);
+  line-height: 1;
+}
+
+.page-description {
+  max-width: 680px;
+  margin: 18px 0 0;
+  color: #5d6a66;
+  font-size: 1.05rem;
+}
+
+.workflow-badge {
+  flex: 0 0 auto;
+  border: 1px solid #cfe1d9;
+  border-radius: 999px;
+  padding: 8px 14px;
+  color: #254d42;
+  background: #eff8f4;
+  font-size: 0.9rem;
+  font-weight: 700;
+}
+
+.upload-panel {
+  border: 1px solid #dce5e1;
+  border-radius: 8px;
+  padding: 28px;
+  background: #ffffff;
+  box-shadow: 0 24px 70px rgba(25, 47, 40, 0.08);
+}
+
+.panel-heading {
+  display: flex;
+  justify-content: space-between;
+  gap: 24px;
+  padding-bottom: 24px;
+  border-bottom: 1px solid #e8efec;
+}
+
+.panel-heading h2 {
+  margin: 0;
+  color: #182824;
+  font-size: 1.35rem;
+}
+
+.panel-heading p {
+  max-width: 640px;
+  margin: 8px 0 0;
+  color: #687672;
+}
+
+.onboarding-form {
+  display: grid;
+  gap: 22px;
+  margin-top: 24px;
+}
+
+.file-drop-zone {
+  display: grid;
+  gap: 8px;
+  min-height: 132px;
+  place-content: center;
+  padding: 24px;
+  border: 1px dashed #9eb9ae;
+  border-radius: 8px;
+  color: #36584f;
+  background: #f7fbf9;
+  text-align: center;
+  cursor: pointer;
+  transition:
+    border-color 160ms ease,
+    background 160ms ease,
+    transform 160ms ease;
+}
+
+.file-drop-zone:hover,
+.file-drop-zone:focus-within {
+  border-color: #3f7b68;
+  background: #eef8f4;
+  transform: translateY(-1px);
+}
+
+.file-drop-zone:has(input:disabled) {
+  cursor: progress;
+  opacity: 0.72;
+}
+
+.file-drop-zone input {
+  position: absolute;
+  inline-size: 1px;
+  block-size: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+.file-label {
+  color: #172723;
+  font-weight: 800;
+}
+
+.file-instructions {
+  color: #60706b;
+  font-size: 0.95rem;
+}
+
+.field-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px;
+}
+
+.field {
+  display: grid;
+  gap: 8px;
+}
+
+.field span {
+  color: #263b36;
+  font-size: 0.92rem;
+  font-weight: 700;
+}
+
+.field input,
+.field select {
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid #cfdcd7;
+  border-radius: 6px;
+  padding: 13px 14px;
+  color: #15231f;
+  background: #ffffff;
+  font: inherit;
+  transition:
+    border-color 160ms ease,
+    box-shadow 160ms ease;
+}
+
+.field select {
+  appearance: none;
+  background-image:
+    linear-gradient(45deg, transparent 50%, #4f625d 50%),
+    linear-gradient(135deg, #4f625d 50%, transparent 50%);
+  background-position:
+    calc(100% - 18px) 55%,
+    calc(100% - 12px) 55%;
+  background-repeat: no-repeat;
+  background-size:
+    6px 6px,
+    6px 6px;
+  padding-right: 40px;
+}
+
+.field input:focus,
+.field select:focus {
+  outline: none;
+  border-color: #3f7b68;
+  box-shadow: 0 0 0 4px rgba(63, 123, 104, 0.12);
+}
+
+.field input:disabled,
+.field select:disabled {
+  cursor: progress;
+  color: #6b7773;
+  background: #f1f5f3;
+}
+
+.submit-button {
+  justify-self: start;
+  border: 0;
+  border-radius: 6px;
+  padding: 13px 22px;
+  color: #ffffff;
+  background: #214d42;
+  font: inherit;
+  font-weight: 800;
+  cursor: pointer;
+  transition:
+    background 160ms ease,
+    transform 160ms ease;
+}
+
+.submit-button:hover,
+.submit-button:focus-visible {
+  background: #17392f;
+  transform: translateY(-1px);
+}
+
+.submit-button:focus-visible {
+  outline: 3px solid rgba(33, 77, 66, 0.24);
+  outline-offset: 3px;
+}
+
+.submit-button:disabled {
+  cursor: progress;
+  background: #6d827b;
+  transform: none;
+}
+
+.status-area {
+  display: grid;
+  gap: 4px;
+  margin-top: 24px;
+  border-radius: 8px;
+  padding: 16px 18px;
+  border: 1px solid #dce5e1;
+  background: #f8faf9;
+}
+
+.status-area span {
+  color: #40554f;
+  font-size: 0.8rem;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.status-area p {
+  margin: 0;
+  color: #243b35;
+}
+
+.status-ready {
+  border-color: #b9d6ca;
+  background: #f1f9f5;
+}
+
+.status-success {
+  border-color: #a9cfbc;
+  background: #eef8f2;
+}
+
+.status-loading {
+  border-color: #b7c9df;
+  background: #f3f7fc;
+}
+
+.status-error {
+  border-color: #e6b8b8;
+  background: #fff5f5;
+}
+
+.status-error p {
+  color: #8a2727;
+}
+
+@media (max-width: 760px) {
+  .app-shell {
+    width: min(100% - 28px, 1040px);
+    padding: 32px 0;
+  }
+
+  .page-header,
+  .field-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .page-header {
+    display: grid;
+    gap: 18px;
+  }
+
+  .workflow-badge,
+  .submit-button {
+    justify-self: start;
+  }
+
+  .upload-panel {
+    padding: 20px;
+  }
+}
