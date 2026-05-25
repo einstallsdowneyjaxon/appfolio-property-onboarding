@@ -3,8 +3,16 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
+import dotenv from 'dotenv'
 
 const rootDir = path.dirname(fileURLToPath(import.meta.url))
+for (const envFile of ['.env.local', '.env']) {
+  const envPath = path.join(rootDir, envFile)
+  if (fs.existsSync(envPath)) {
+    dotenv.config({ path: envPath, override: false, quiet: true })
+  }
+}
+
 const port = Number(process.env.PORT || 8788)
 const appUrl = `http://127.0.0.1:${port}`
 const propertyJobLogFile = path.join(rootDir, 'property-onboarding-job.log')

@@ -43,11 +43,9 @@ const CONFIG = {
   googleOAuthClientPath:
     process.env.GOOGLE_OAUTH_CLIENT_JSON ||
     'C:/Users/Inqui/Downloads/client_secret_172984887894-fao8ei9m253ll9eoi4i3k45q4i54m9s4.apps.googleusercontent.com.json',
-  googleOAuthTokenPath: path.resolve(rootDir, process.env.GOOGLE_OAUTH_TOKEN_PATH || '.appfolio-google-token.json'),
-  userDataDir: path.resolve(
-    rootDir,
-    process.env.PLAYWRIGHT_USER_DATA_DIR || '../appfolio-renewal-clean/.playwright-appfolio-profile',
-  ),
+  googleOAuthTokenPath: resolvePathFromRoot(process.env.GOOGLE_OAUTH_TOKEN_PATH, '.appfolio-google-token.json'),
+  rawUserDataDir: process.env.PLAYWRIGHT_USER_DATA_DIR || '../appfolio-renewal-clean/.playwright-appfolio-profile',
+  userDataDir: resolvePathFromRoot(process.env.PLAYWRIGHT_USER_DATA_DIR, '../appfolio-renewal-clean/.playwright-appfolio-profile'),
   headless: parseBoolean(process.env.HEADLESS, false),
   slowMo: Number(process.env.PLAYWRIGHT_SLOW_MO || '80'),
   appfolioMfaCode: process.env.APPFOLIO_MFA_CODE || '',
@@ -139,6 +137,11 @@ function fail(message) {
 function parseBoolean(value, fallback) {
   if (value == null || value === '') return fallback
   return ['1', 'true', 'yes', 'y'].includes(String(value).toLowerCase())
+}
+
+function resolvePathFromRoot(value, fallback) {
+  const chosen = value || fallback
+  return path.isAbsolute(chosen) ? path.resolve(chosen) : path.resolve(rootDir, chosen)
 }
 
 function parsePayloadJson(value, source) {
@@ -2415,6 +2418,30 @@ function extractPropertyId(url) {
   return String(url || '').match(/\/properties\/(\d+)/)?.[1] || ''
 }
 
+function assertPersistentProfileReady() {
+  log('PLAYWRIGHT_PROFILE_ENV', `raw="${CONFIG.rawUserDataDir}" resolved="${CONFIG.userDataDir}" cwd="${process.cwd()}" rootDir="${rootDir}"`)
+  if (!fs.existsSync(CONFIG.userDataDir)) {
+    throw new Error(
+      `PLAYWRIGHT_USER_DATA_DIR does not exist: ${CONFIG.userDataDir}. ` +
+        'Refusing to create a fresh empty browser profile because AppFolio auth reuse would fail.',
+    )
+  }
+
+  const defaultProfileDir = path.join(CONFIG.userDataDir, 'Default')
+  const hasDefaultProfile = fs.existsSync(defaultProfileDir)
+  const singletonLock = path.join(CONFIG.userDataDir, 'SingletonLock')
+  log(
+    'PLAYWRIGHT_PROFILE_CHECK',
+    `exists=true defaultProfile=${hasDefaultProfile} singletonLock=${fs.existsSync(singletonLock)}`,
+  )
+  if (!hasDefaultProfile && !parseBoolean(process.env.ALLOW_EMPTY_PLAYWRIGHT_PROFILE, false)) {
+    throw new Error(
+      `PLAYWRIGHT_USER_DATA_DIR exists but does not look like a Chromium profile: ${CONFIG.userDataDir}. ` +
+        'Expected a Default/ directory. Set ALLOW_EMPTY_PLAYWRIGHT_PROFILE=true only for first-time login training.',
+    )
+  }
+}
+
 function normalizeSectionName(value) {
   return String(value || '').replace(/[^a-z0-9]/gi, '').toLowerCase()
 }
@@ -2488,6 +2515,7 @@ async function main() {
     const password = process.env.APPFOLIO_PASSWORD || ''
     log('Launching Playwright', CONFIG.headless ? 'headless' : 'headed')
     log('Using Playwright persistent profile', CONFIG.userDataDir)
+    assertPersistentProfileReady()
     context = await chromium.launchPersistentContext(CONFIG.userDataDir, {
       headless: CONFIG.headless,
       slowMo: CONFIG.slowMo,
