@@ -1,24 +1,25 @@
 #!/usr/bin/env node
 
-import fs from 'node:fs'
-import http from 'node:http'
 import path from 'node:path'
 import process from 'node:process'
 import readline from 'node:readline/promises'
-import { execFile } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
-import dotenv from 'dotenv'
-import { chromium } from 'playwright'
-import { google } from 'googleapis'
+import {
+  getOnboardingAppfolioConfig,
+  launchOnboardingPersistentContext,
+  loginToAppFolio,
+} from './lib/onboardingAppfolioAuth.js'
+import {
+  getOnboardingGoogleConfig,
+  getOnboardingSheetsClient,
+} from './lib/onboardingGoogleAuth.js'
+import { loadOnboardingEnv, parseBoolean } from './lib/onboardingEnv.js'
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
+loadOnboardingEnv(rootDir)
 
-for (const envFile of ['.env.local', '.env']) {
-  const envPath = path.join(rootDir, envFile)
-  if (fs.existsSync(envPath)) {
-    dotenv.config({ path: envPath, override: false, quiet: true })
-  }
-}
+const APPFOLIO_AUTH_CONFIG = getOnboardingAppfolioConfig(rootDir)
+const GOOGLE_AUTH_CONFIG = getOnboardingGoogleConfig(rootDir)
 
 const DEFAULT_ADDENDUMS = [
   'ADDENDA 1-5',
@@ -40,14 +41,12 @@ const CONFIG = {
   appfolioUrl: process.env.APPFOLIO_URL || 'https://thetgpm.appfolio.com',
   spreadsheetId: process.env.PROPERTY_ONBOARDING_SPREADSHEET_ID || '1VNjBAp_19s7ShBFHmF6u-w2crGnywCZogy4CgQcrHHU',
   sheetName: process.env.PROPERTY_ONBOARDING_TAB || 'Property_Onboarding',
-  googleOAuthClientPath:
-    process.env.GOOGLE_OAUTH_CLIENT_JSON ||
-    'C:/Users/Inqui/Downloads/client_secret_172984887894-fao8ei9m253ll9eoi4i3k45q4i54m9s4.apps.googleusercontent.com.json',
-  googleOAuthTokenPath: resolvePathFromRoot(process.env.GOOGLE_OAUTH_TOKEN_PATH, '.appfolio-google-token.json'),
-  rawUserDataDir: process.env.PLAYWRIGHT_USER_DATA_DIR || '../appfolio-renewal-clean/.playwright-appfolio-profile',
-  userDataDir: resolvePathFromRoot(process.env.PLAYWRIGHT_USER_DATA_DIR, '../appfolio-renewal-clean/.playwright-appfolio-profile'),
-  headless: parseBoolean(process.env.HEADLESS, false),
-  slowMo: Number(process.env.PLAYWRIGHT_SLOW_MO || '80'),
+  googleOAuthClientPath: GOOGLE_AUTH_CONFIG.googleOAuthClientPath,
+  googleOAuthTokenPath: GOOGLE_AUTH_CONFIG.googleOAuthTokenPath,
+  rawUserDataDir: APPFOLIO_AUTH_CONFIG.rawUserDataDir,
+  userDataDir: APPFOLIO_AUTH_CONFIG.userDataDir,
+  headless: APPFOLIO_AUTH_CONFIG.headless,
+  slowMo: APPFOLIO_AUTH_CONFIG.slowMo,
   appfolioMfaCode: process.env.APPFOLIO_MFA_CODE || '',
   appfolioLoginTimeoutMs: Number(process.env.APPFOLIO_LOGIN_TIMEOUT_MS || '60000'),
   appfolioActionTimeoutMs: Number(process.env.APPFOLIO_ACTION_TIMEOUT_MS || '30000'),
@@ -132,16 +131,6 @@ function logState(state, detail = '') {
 
 function fail(message) {
   throw new Error(message)
-}
-
-function parseBoolean(value, fallback) {
-  if (value == null || value === '') return fallback
-  return ['1', 'true', 'yes', 'y'].includes(String(value).toLowerCase())
-}
-
-function resolvePathFromRoot(value, fallback) {
-  const chosen = value || fallback
-  return path.isAbsolute(chosen) ? path.resolve(chosen) : path.resolve(rootDir, chosen)
 }
 
 function parsePayloadJson(value, source) {
@@ -332,101 +321,6 @@ async function resolveRowsToProcess() {
   return readIncompletePropertyOnboardingRows()
 }
 
-async function getGoogleAuth() {
-  const scopes = [
-    'https://www.googleapis.com/auth/drive.readonly',
-    'https://www.googleapis.com/auth/spreadsheets',
-  ]
-
-  if (!fs.existsSync(CONFIG.googleOAuthClientPath)) {
-    fail(`Google OAuth client JSON not found: ${CONFIG.googleOAuthClientPath}`)
-  }
-
-  const clientConfig = JSON.parse(fs.readFileSync(CONFIG.googleOAuthClientPath, 'utf8'))
-  const installed = clientConfig.installed || clientConfig.web
-  if (!installed?.client_id || !installed?.client_secret) {
-    fail('Google OAuth client JSON must contain installed.client_id and installed.client_secret')
-  }
-
-  const oauthClient = new google.auth.OAuth2(installed.client_id, installed.client_secret)
-  if (fs.existsSync(CONFIG.googleOAuthTokenPath)) {
-    oauthClient.setCredentials(JSON.parse(fs.readFileSync(CONFIG.googleOAuthTokenPath, 'utf8')))
-    log('Google OAuth', `Using saved refresh token at ${CONFIG.googleOAuthTokenPath}`)
-    return oauthClient
-  }
-
-  return runGoogleOAuthFirstLogin(oauthClient, scopes)
-}
-
-async function runGoogleOAuthFirstLogin(oauthClient, scopes) {
-  log('Google OAuth', 'No saved token found; opening browser for first-time Google login')
-  const server = http.createServer()
-  const port = await new Promise((resolve, reject) => {
-    server.once('error', reject)
-    server.listen(0, '127.0.0.1', () => resolve(server.address().port))
-  })
-
-  const redirectUri = `http://127.0.0.1:${port}/oauth2callback`
-  oauthClient.redirectUri = redirectUri
-  const authUrl = oauthClient.generateAuthUrl({
-    access_type: 'offline',
-    prompt: 'consent',
-    scope: scopes,
-    redirect_uri: redirectUri,
-  })
-
-  const codePromise = waitForOAuthCode(server)
-  await openUrl(authUrl)
-  const code = await codePromise
-  const { tokens } = await oauthClient.getToken({ code, redirect_uri: redirectUri })
-  oauthClient.setCredentials(tokens)
-  fs.writeFileSync(CONFIG.googleOAuthTokenPath, JSON.stringify(tokens, null, 2))
-  log('Google OAuth', `Saved token at ${CONFIG.googleOAuthTokenPath}`)
-  return oauthClient
-}
-
-function waitForOAuthCode(server) {
-  return new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => {
-      server.close()
-      reject(new Error('Timed out waiting for Google OAuth callback'))
-    }, Number(process.env.GOOGLE_OAUTH_TIMEOUT_MS || '300000'))
-
-    server.on('request', (req, res) => {
-      const requestUrl = new URL(req.url, `http://${req.headers.host}`)
-      if (requestUrl.pathname !== '/oauth2callback') {
-        res.writeHead(404)
-        res.end('Not found')
-        return
-      }
-      const code = requestUrl.searchParams.get('code')
-      clearTimeout(timeout)
-      if (!code) {
-        res.writeHead(400)
-        res.end('Missing OAuth code')
-        reject(new Error('Missing OAuth code'))
-        return
-      }
-      res.writeHead(200, { 'Content-Type': 'text/html' })
-      res.end('<h1>Google Sheets access connected.</h1><p>You can close this tab.</p>')
-      server.close()
-      resolve(code)
-    })
-  })
-}
-
-function openUrl(url) {
-  return new Promise((resolve) => {
-    const command =
-      process.platform === 'win32'
-        ? ['powershell.exe', ['-NoProfile', '-Command', 'Start-Process -FilePath $args[0]', url]]
-        : process.platform === 'darwin'
-          ? ['open', [url]]
-          : ['xdg-open', [url]]
-    execFile(command[0], command[1], () => resolve())
-  })
-}
-
 function escapeSheetName(name) {
   return `'${String(name).replace(/'/g, "''")}'`
 }
@@ -460,8 +354,7 @@ function statusIsCompleted(value) {
 }
 
 async function getSheetsClient() {
-  const auth = await getGoogleAuth()
-  return google.sheets({ version: 'v4', auth })
+  return getOnboardingSheetsClient(GOOGLE_AUTH_CONFIG, { log })
 }
 
 async function readPropertyOnboardingRow(rowNumber) {
@@ -654,96 +547,6 @@ async function retryAction(description, action, retries = 2) {
   throw lastError
 }
 
-async function login(page, username = '', password = '') {
-  log('LOGIN_STEP', `Opening AppFolio ${CONFIG.appfolioUrl}`)
-  await page.goto(CONFIG.appfolioUrl, { waitUntil: 'domcontentloaded', timeout: CONFIG.appfolioLoginTimeoutMs })
-  if (await waitForAppFolioShell(page, 5000, 'session reuse').catch(() => false)) {
-    logState('SESSION_REUSED', 'Existing AppFolio authenticated browser session is valid')
-    return
-  }
-
-  logState('LOGIN_REQUIRED', 'Existing AppFolio session is missing or expired')
-  if (await clickAutofilledLoginIfPresent(page)) {
-    await waitForLoginOutcome(page)
-    logState('LOGIN_SUCCESS', 'AppFolio authenticated session saved in persistent browser profile')
-    return
-  }
-
-  if (!username || !password) {
-    await waitForManualLogin(page, 'AppFolio login is required, but APPFOLIO_USERNAME or APPFOLIO_PASSWORD is missing.')
-    return
-  }
-  await visibleFirst(page.locator('input[type="email"], input[name*="email" i], input[name*="username" i]').first(), 'login username')
-  await fillByLabelOrLocator(page, ['email', 'username', 'login'], username, page.locator('input[type="email"], input[name*="email" i], input[name*="username" i]').first())
-  await fillByLabelOrLocator(page, ['password'], password, page.locator('input[type="password"]').first())
-  await clickByRoleOrText(page, /sign in|log in|login/i, 'login button')
-  await waitForLoginOutcome(page)
-  logState('LOGIN_SUCCESS', 'AppFolio authenticated session saved in persistent browser profile')
-}
-
-async function clickAutofilledLoginIfPresent(page) {
-  const hasLoginForm = await page.locator('input[type="password"]').first().isVisible({ timeout: 2000 }).catch(() => false)
-  if (!hasLoginForm) return false
-
-  const submit = await visibleFirst(
-    page.locator('input[type="submit"], button').filter({ hasText: /log in|login|sign in/i }).or(page.locator('input[type="submit"][name="login"], #kc-login')),
-    'autofilled AppFolio login button',
-    3000,
-  ).catch(() => null)
-  if (!submit) return false
-
-  logState('LOGIN_AUTOFILLED_SUBMIT', 'Clicking AppFolio login button using browser-saved credentials')
-  await submit.click({ force: true })
-  await page.waitForLoadState('domcontentloaded').catch(() => {})
-  await page.waitForTimeout(1000)
-  return true
-}
-
-async function waitForLoginOutcome(page) {
-  const deadline = Date.now() + CONFIG.appfolioLoginTimeoutMs
-  while (Date.now() < deadline) {
-    if (await waitForAppFolioShell(page, 1000, 'login outcome', { diagnose: false }).catch(() => false)) return
-    const bodyText = await page.locator('body').innerText({ timeout: 1000 }).catch(() => '')
-    if (/verification|2-step|two-step|mfa|code/i.test(bodyText)) {
-      if (!CONFIG.appfolioMfaCode) {
-        await waitForManualLogin(page, 'AppFolio requested MFA. Complete verification in the browser.')
-        return
-      }
-      await fillByLabelOrLocator(page, ['code', 'verification'], CONFIG.appfolioMfaCode, page.locator('input').last())
-      await clickByRoleOrText(page, /verify|submit|continue|sign in|log in/i, 'MFA submit button')
-    }
-    if (/invalid|incorrect|could not log|try again|account locked/i.test(bodyText)) {
-      fail(`AppFolio login page reported an error. Page text starts with: ${bodyText.slice(0, 300)}`)
-    }
-    await page.waitForTimeout(1000)
-  }
-  fail(`AppFolio login did not complete within ${CONFIG.appfolioLoginTimeoutMs}ms`)
-}
-
-async function waitForManualLogin(page, reason) {
-  logState('MANUAL_LOGIN_REQUIRED', reason)
-  if (!process.stdin.isTTY) {
-    throw new Error(`${reason} Manual login requires an interactive terminal.`)
-  }
-
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout })
-  try {
-    while (true) {
-      const answer = (await rl.question('Complete AppFolio login/MFA in the headed browser, then type DONE and press Enter: ')).trim()
-      if (!/^done$/i.test(answer)) {
-        throw new Error('Manual AppFolio login was not confirmed by the user.')
-      }
-      if (await waitForAppFolioShell(page, 8000, 'manual login confirmation', { diagnose: false }).catch(() => false)) {
-        logState('LOGIN_SUCCESS', 'Manual AppFolio login completed and the persistent profile is ready')
-        return
-      }
-      logState('MANUAL_LOGIN_STILL_PENDING', 'AppFolio dashboard or navigation is not visible yet.')
-    }
-  } finally {
-    rl.close()
-  }
-}
-
 async function visibleFirst(locator, description, timeout = CONFIG.appfolioActionTimeoutMs) {
   const deadline = Date.now() + timeout
   let lastError
@@ -775,46 +578,6 @@ async function clickVisibleText(page, textOrRegex, description) {
   const target = await visibleFirst(candidate, description, 5000)
   await target.click({ force: true })
   await page.waitForTimeout(400)
-}
-
-async function fillByLabelOrLocator(page, labels, value, fallbackLocator) {
-  for (const label of labels) {
-    const field = await page.getByLabel(new RegExp(label, 'i')).first().isVisible().then(() => page.getByLabel(new RegExp(label, 'i')).first()).catch(() => null)
-    if (field) {
-      await replaceInputValue(field, value)
-      return
-    }
-  }
-  const fallback = await visibleFirst(fallbackLocator, labels[0], 3000)
-  await replaceInputValue(fallback, value)
-}
-
-async function waitForAppFolioShell(page, timeout, context, { diagnose = true } = {}) {
-  const deadline = Date.now() + timeout
-  while (Date.now() < deadline) {
-    const shellReady = await page.evaluate(() => {
-      function textIncludes(pattern) {
-        return pattern.test(document.body?.innerText || '')
-      }
-
-      const url = window.location.href
-      const title = document.title || ''
-      const appUrlReady = /thetgpm\.appfolio\.com/.test(url) && !/account\.appfolio\.com/.test(url)
-      const appTitleReady = /Dashboard|Properties|Tasks|AppFolio Property Manager/i.test(title)
-      const navReady = textIncludes(/\bProperties\b/i) || textIncludes(/\bTasks\b/i) || textIncludes(/\bDashboard\b/i)
-
-      return appUrlReady && (appTitleReady || navReady)
-    }).catch(() => false)
-
-    if (shellReady) {
-      log('APPFOLIO_SHELL_READY', context)
-      return true
-    }
-    await page.waitForTimeout(500)
-  }
-
-  if (diagnose) await capturePageDiagnostics(page, 'appfolio-shell-not-ready', context)
-  throw new SoftStepError(`Could not confirm AppFolio dashboard/navigation for ${context}`)
 }
 
 async function navigateToNewProperty(page) {
@@ -2418,37 +2181,18 @@ function extractPropertyId(url) {
   return String(url || '').match(/\/properties\/(\d+)/)?.[1] || ''
 }
 
-function assertPersistentProfileReady() {
-  log('PLAYWRIGHT_PROFILE_ENV', `raw="${CONFIG.rawUserDataDir}" resolved="${CONFIG.userDataDir}" cwd="${process.cwd()}" rootDir="${rootDir}"`)
-  if (!fs.existsSync(CONFIG.userDataDir)) {
-    throw new Error(
-      `PLAYWRIGHT_USER_DATA_DIR does not exist: ${CONFIG.userDataDir}. ` +
-        'Refusing to create a fresh empty browser profile because AppFolio auth reuse would fail.',
-    )
-  }
-
-  const defaultProfileDir = path.join(CONFIG.userDataDir, 'Default')
-  const hasDefaultProfile = fs.existsSync(defaultProfileDir)
-  const singletonLock = path.join(CONFIG.userDataDir, 'SingletonLock')
-  log(
-    'PLAYWRIGHT_PROFILE_CHECK',
-    `exists=true defaultProfile=${hasDefaultProfile} singletonLock=${fs.existsSync(singletonLock)}`,
-  )
-  if (!hasDefaultProfile && !parseBoolean(process.env.ALLOW_EMPTY_PLAYWRIGHT_PROFILE, false)) {
-    throw new Error(
-      `PLAYWRIGHT_USER_DATA_DIR exists but does not look like a Chromium profile: ${CONFIG.userDataDir}. ` +
-        'Expected a Default/ directory. Set ALLOW_EMPTY_PLAYWRIGHT_PROFILE=true only for first-time login training.',
-    )
-  }
-}
-
 function normalizeSectionName(value) {
   return String(value || '').replace(/[^a-z0-9]/gi, '').toLowerCase()
 }
 
 async function runWorkflow(page, row, username, password) {
   const sections = [
-    ['login', () => login(page, username, password)],
+    ['login', () => loginToAppFolio(page, APPFOLIO_AUTH_CONFIG, {
+      username,
+      password,
+      interactive: Boolean(process.stdin.isTTY),
+      log,
+    })],
     ['navigateToNewProperty', () => navigateToNewProperty(page)],
     ['propertyDetails', () => propertyDetails(page, row)],
     ['siteManager', () => siteManager(page, row)],
@@ -2515,11 +2259,10 @@ async function main() {
     const password = process.env.APPFOLIO_PASSWORD || ''
     log('Launching Playwright', CONFIG.headless ? 'headless' : 'headed')
     log('Using Playwright persistent profile', CONFIG.userDataDir)
-    assertPersistentProfileReady()
-    context = await chromium.launchPersistentContext(CONFIG.userDataDir, {
-      headless: CONFIG.headless,
-      slowMo: CONFIG.slowMo,
-      viewport: { width: 1440, height: 1000 },
+    context = await launchOnboardingPersistentContext(APPFOLIO_AUTH_CONFIG, {
+      rootDir,
+      allowEmptyProfile: parseBoolean(process.env.ALLOW_EMPTY_PLAYWRIGHT_PROFILE, false),
+      log,
     })
     page = context.pages()[0] || await context.newPage()
     page.setDefaultTimeout(Number(process.env.PLAYWRIGHT_TIMEOUT_MS || '15000'))

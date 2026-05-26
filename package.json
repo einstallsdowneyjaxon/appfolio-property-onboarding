@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "server": "node server.js",
+    "appfolio:onboarding-login": "node scripts/appfolio-onboarding-login.js",
     "appfolio:create-property": "node scripts/appfolio-create-property.js",
     "build": "vite build",
     "lint": "eslint .",

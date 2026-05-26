@@ -1,16 +1,46 @@
-# React + Vite
+# Property Onboarding
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+React/Vite upload UI plus AppFolio property onboarding automation.
 
-Currently, two official plugins are available:
+## AppFolio Onboarding Auth
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+Property onboarding uses its own dedicated AppFolio Chromium profile. Do not point it at the renewal bot profile.
 
-## React Compiler
+Production profile path:
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+```bash
+/root/appfolio-property-onboarding/.playwright-appfolio-profile
+```
 
-## Expanding the ESLint configuration
+Production `.env.local` should include:
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+```bash
+APPFOLIO_URL=https://thetgpm.appfolio.com
+PLAYWRIGHT_USER_DATA_DIR=/root/appfolio-property-onboarding/.playwright-appfolio-profile
+HEADLESS=true
+GOOGLE_OAUTH_CLIENT_JSON=/root/appfolio-property-onboarding/client_secret.json
+GOOGLE_OAUTH_TOKEN_PATH=/root/appfolio-property-onboarding/.appfolio-google-token.json
+```
+
+The property runner fails loudly if the onboarding profile directory is missing or does not look like a Chromium profile. This prevents Playwright from silently creating an empty unauthenticated profile.
+
+## First-Time AppFolio Login
+
+On the VPS, run the headed bootstrap once to create and save the onboarding AppFolio session:
+
+```bash
+cd /root/appfolio-property-onboarding
+mkdir -p /root/appfolio-property-onboarding/.playwright-appfolio-profile
+xvfb-run -a npm run appfolio:onboarding-login
+```
+
+Complete AppFolio login/MFA in the launched browser. When the AppFolio dashboard/app shell is visible, return to the terminal, type `DONE`, and press Enter. The script closes Chromium cleanly so the profile is saved.
+
+After that, production jobs can run headless through PM2.
+
+## Notes
+
+- Renewal bot auth is intentionally separate and untouched.
+- Do not run onboarding against `/root/appfolio-renewal/.playwright-appfolio-profile`.
+- Google OAuth token/client paths are onboarding-owned runtime files. They are not committed.
+- The onboarding Google auth module reuses an existing saved token and fails if the token/client JSON is missing.
