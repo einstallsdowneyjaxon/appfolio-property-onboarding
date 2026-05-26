@@ -26,17 +26,57 @@ The property runner fails loudly if the onboarding profile directory is missing 
 
 ## First-Time AppFolio Login
 
-On the VPS, run the headed bootstrap once to create and save the onboarding AppFolio session:
+The most reliable bootstrap path is to complete AppFolio login/MFA in a visible browser on the VPS itself. This creates the Linux Chromium profile directly at:
+
+```bash
+/root/appfolio-property-onboarding/.playwright-appfolio-profile
+```
+
+Do not use plain `xvfb-run` for MFA. It starts a browser, but the display is invisible.
+
+### Visible VPS Login With noVNC
+
+Install the visible desktop pieces once:
 
 ```bash
 cd /root/appfolio-property-onboarding
+apt-get update
+apt-get install -y xvfb fluxbox x11vnc novnc websockify
+```
+
+Start the noVNC display helper:
+
+```bash
+npm run appfolio:onboarding-novnc
+```
+
+From your local computer, open an SSH tunnel to the VPS:
+
+```bash
+ssh -L 6080:127.0.0.1:6080 root@YOUR_VPS_IP
+```
+
+Then open this URL on your local computer:
+
+```text
+http://127.0.0.1:6080/vnc.html
+```
+
+In a second VPS terminal, run the login bootstrap against that visible display:
+
+```bash
+pm2 stop property-onboarding
 mkdir -p /root/appfolio-property-onboarding/.playwright-appfolio-profile
-xvfb-run -a npm run appfolio:onboarding-login
+DISPLAY=:99 npm run appfolio:onboarding-login
 ```
 
 Complete AppFolio login/MFA in the launched browser. When the AppFolio dashboard/app shell is visible, return to the terminal, type `DONE`, and press Enter. The script closes Chromium cleanly so the profile is saved.
 
 After that, production jobs can run headless through PM2.
+
+### Local Profile Copy Alternative
+
+Copying a Chromium profile from Windows/macOS to Linux is not the preferred path because browser cookies may be encrypted differently by each operating system. Use noVNC first. Only try local profile copying if the VPS-visible login path is unavailable.
 
 ## Notes
 
