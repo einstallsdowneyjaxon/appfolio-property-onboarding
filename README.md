@@ -27,7 +27,18 @@ GOOGLE_OAUTH_TOKEN_PATH=/root/appfolio-property-onboarding/.appfolio-google-toke
 
 The property runner fails loudly if the onboarding profile directory is missing or does not look like a Chromium profile. This prevents Playwright from silently creating an empty unauthenticated profile.
 
-During normal HTTP/n8n-triggered onboarding jobs, the bot verifies the existing AppFolio session first. If AppFolio shows the login page, it fills `APPFOLIO_USERNAME` and `APPFOLIO_PASSWORD`, clicks login, waits for MFA only if required, then continues the existing property onboarding workflow after the AppFolio shell is confirmed.
+During normal HTTP/n8n-triggered onboarding jobs, the bot verifies the existing AppFolio session first. If AppFolio shows the login page, it fills `APPFOLIO_USERNAME` and `APPFOLIO_PASSWORD`, clicks login, handles the 2-Step Verification flow when required, then continues the existing property onboarding workflow after the AppFolio shell is confirmed.
+
+If AppFolio asks how to receive the verification code, onboarding selects SMS and clicks `Send Verification Code`. To automate code entry, set:
+
+```bash
+GETMYMFA_CODE_URL=https://your-getmymfa-endpoint.example/code
+GETMYMFA_API_KEY=optional-bearer-token
+GETMYMFA_POLL_TIMEOUT_MS=180000
+GETMYMFA_POLL_INTERVAL_MS=5000
+```
+
+The GetMyMFA response can be JSON with `code`, `mfaCode`, `otp`, or `token`, or plain text containing the numeric code. If GetMyMFA is not configured or no code is returned, onboarding keeps the manual noVNC fallback.
 
 ## First-Time AppFolio Login
 

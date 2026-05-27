@@ -11,6 +11,10 @@ export function getOnboardingAppfolioConfig(rootDir, env = process.env) {
     appfolioLoginTimeoutMs: Number(env.APPFOLIO_LOGIN_TIMEOUT_MS || '60000'),
     appfolioActionTimeoutMs: Number(env.APPFOLIO_ACTION_TIMEOUT_MS || '30000'),
     appfolioManualLoginTimeoutMs: Number(env.APPFOLIO_MANUAL_LOGIN_TIMEOUT_MS || '600000'),
+    getMyMfaCodeUrl: env.GETMYMFA_CODE_URL || '',
+    getMyMfaApiKey: env.GETMYMFA_API_KEY || '',
+    getMyMfaPollTimeoutMs: Number(env.GETMYMFA_POLL_TIMEOUT_MS || '180000'),
+    getMyMfaPollIntervalMs: Number(env.GETMYMFA_POLL_INTERVAL_MS || '5000'),
     headless: parseBoolean(env.HEADLESS, false),
     slowMo: Number(env.PLAYWRIGHT_SLOW_MO || '80'),
     rawUserDataDir: env.PLAYWRIGHT_USER_DATA_DIR || ONBOARDING_APPFOLIO_PROFILE,
@@ -132,14 +136,15 @@ async function waitForLoginOutcome(page, config, { interactive, log }) {
   while (Date.now() < deadline) {
     if (await waitForAppFolioShell(page, 1000, 'login outcome', { diagnose: false, log }).catch(() => false)) return
     const bodyText = await page.locator('body').innerText({ timeout: 1000 }).catch(() => '')
+    if (isMfaChoiceScreen(bodyText)) {
+      await requestSmsVerificationCode(page, config, log)
+      await submitMfaCodeOrWait(page, config, { interactive, log })
+      return
+    }
     if (/verification|2-step|two-step|mfa|code/i.test(bodyText)) {
       log('MFA_REQUIRED', 'AppFolio requested MFA or verification')
-      if (!config.appfolioMfaCode) {
-        await waitForManualLogin(page, config, 'AppFolio requested MFA. Complete verification in the visible browser/noVNC session.', { interactive, log })
-        return
-      }
-      await fillLoginField(page, ['code', 'verification'], page.locator('input').last(), config.appfolioMfaCode)
-      await clickLoginButton(page, config)
+      await submitMfaCodeOrWait(page, config, { interactive, log })
+      return
     }
     if (/invalid|incorrect|could not log|try again|account locked/i.test(bodyText)) {
       throw new Error(`AppFolio login page reported an error. Page text starts with: ${bodyText.slice(0, 300)}`)
@@ -147,6 +152,134 @@ async function waitForLoginOutcome(page, config, { interactive, log }) {
     await page.waitForTimeout(1000)
   }
   throw new Error(`AppFolio login did not complete within ${config.appfolioLoginTimeoutMs}ms`)
+}
+
+function isMfaChoiceScreen(bodyText) {
+  return /2-step verification|two-step verification|verification method/i.test(bodyText) &&
+    /receive code via sms|sms/i.test(bodyText) &&
+    /send verification code/i.test(bodyText)
+}
+
+async function requestSmsVerificationCode(page, config, log) {
+  log('MFA_REQUIRED', 'AppFolio requested 2-Step Verification method selection')
+  await selectSmsVerificationMethod(page, config, log)
+  const sendButton = await visibleFirst(
+    page.locator('button, a, [role="button"], input[type="submit"]').filter({ hasText: /send verification code/i }).or(page.locator('input[type="submit"][value*="Send Verification Code" i]')),
+    'Send Verification Code button',
+    config.appfolioActionTimeoutMs,
+  )
+  await sendButton.click({ force: true })
+  await page.waitForLoadState('domcontentloaded').catch(() => {})
+  await page.waitForTimeout(1000)
+  log('MFA_CODE_REQUESTED', 'Clicked Send Verification Code after selecting SMS')
+}
+
+async function selectSmsVerificationMethod(page, config, log) {
+  const smsRadio = page.locator('input[type="radio"]').filter({ hasText: /sms/i }).first()
+  if (await smsRadio.isVisible({ timeout: 1000 }).catch(() => false)) {
+    if (!(await smsRadio.isChecked().catch(() => false))) await smsRadio.check({ force: true })
+    log('MFA_SMS_SELECTED', 'Selected SMS verification radio')
+    return
+  }
+
+  const selected = await page.evaluate(() => {
+    const labels = Array.from(document.querySelectorAll('label'))
+    const smsLabel = labels.find((label) => /receive code via sms|sms/i.test(label.innerText || label.textContent || ''))
+    if (smsLabel) {
+      const forId = smsLabel.getAttribute('for')
+      const radio = forId ? document.getElementById(forId) : smsLabel.querySelector('input[type="radio"]')
+      if (radio && radio instanceof HTMLInputElement) {
+        radio.checked = true
+        radio.dispatchEvent(new Event('input', { bubbles: true }))
+        radio.dispatchEvent(new Event('change', { bubbles: true }))
+        return true
+      }
+      smsLabel.click()
+      return true
+    }
+
+    const radios = Array.from(document.querySelectorAll('input[type="radio"]'))
+    const smsRadio = radios.find((radio) => /sms/i.test(`${radio.value || ''} ${radio.id || ''} ${radio.name || ''}`))
+    if (smsRadio && smsRadio instanceof HTMLInputElement) {
+      smsRadio.checked = true
+      smsRadio.dispatchEvent(new Event('input', { bubbles: true }))
+      smsRadio.dispatchEvent(new Event('change', { bubbles: true }))
+      return true
+    }
+    return false
+  })
+
+  if (!selected) {
+    const smsText = await visibleFirst(page.getByText(/receive code via sms|sms/i), 'SMS verification option', config.appfolioActionTimeoutMs)
+    await smsText.click({ force: true })
+  }
+  log('MFA_SMS_SELECTED', 'Selected SMS verification option')
+}
+
+async function submitMfaCodeOrWait(page, config, { interactive, log }) {
+  const code = await getConfiguredMfaCode(config, log)
+  if (!code) {
+    await waitForManualLogin(page, config, 'AppFolio requested MFA. Complete verification in the visible browser/noVNC session.', { interactive, log })
+    return
+  }
+
+  await fillMfaCode(page, config, code)
+  log('MFA_CODE_FILLED', 'Entered verification code')
+  await clickLoginButton(page, config)
+  await waitForAppFolioShell(page, config.appfolioLoginTimeoutMs, 'MFA login completion', { diagnose: true, log })
+}
+
+async function getConfiguredMfaCode(config, log) {
+  if (config.getMyMfaCodeUrl) {
+    const code = await pollGetMyMfaCode(config, log)
+    if (code) return code
+  }
+  return config.appfolioMfaCode || ''
+}
+
+async function pollGetMyMfaCode(config, log) {
+  log('GETMYMFA_POLL_STARTED', `Polling GetMyMFA for up to ${config.getMyMfaPollTimeoutMs}ms`)
+  const deadline = Date.now() + config.getMyMfaPollTimeoutMs
+  let lastError = ''
+  while (Date.now() < deadline) {
+    try {
+      const headers = config.getMyMfaApiKey ? { Authorization: `Bearer ${config.getMyMfaApiKey}` } : {}
+      const response = await fetch(config.getMyMfaCodeUrl, { headers })
+      const text = await response.text()
+      if (!response.ok) {
+        lastError = `HTTP ${response.status}: ${text.slice(0, 160)}`
+      } else {
+        const code = extractMfaCode(text)
+        if (code) {
+          log('GETMYMFA_CODE_RECEIVED', 'Received verification code from GetMyMFA')
+          return code
+        }
+      }
+    } catch (error) {
+      lastError = error.message
+    }
+    await new Promise((resolve) => setTimeout(resolve, config.getMyMfaPollIntervalMs))
+  }
+  log('GETMYMFA_POLL_TIMEOUT', lastError || 'No verification code returned')
+  return ''
+}
+
+function extractMfaCode(value) {
+  const text = String(value || '')
+  try {
+    const parsed = JSON.parse(text)
+    const candidates = [parsed.code, parsed.mfaCode, parsed.otp, parsed.token, parsed.data?.code, parsed.data?.otp]
+    const found = candidates.find((candidate) => /^\d{4,10}$/.test(String(candidate || '').trim()))
+    if (found) return String(found).trim()
+  } catch {
+    // Plain-text responses are supported below.
+  }
+  return text.match(/\b\d{4,10}\b/)?.[0] || ''
+}
+
+async function fillMfaCode(page, config, code) {
+  const codeInput = page.locator('input[type="text"], input[type="tel"], input[type="number"], input:not([type])').last()
+  await fillLoginField(page, ['code', 'verification'], codeInput, code)
 }
 
 async function waitForManualLogin(page, config, reason, { interactive, log }) {
