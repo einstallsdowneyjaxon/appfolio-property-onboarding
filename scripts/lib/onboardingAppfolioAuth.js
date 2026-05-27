@@ -10,6 +10,7 @@ export function getOnboardingAppfolioConfig(rootDir, env = process.env) {
     appfolioMfaCode: env.APPFOLIO_MFA_CODE || '',
     appfolioLoginTimeoutMs: Number(env.APPFOLIO_LOGIN_TIMEOUT_MS || '60000'),
     appfolioActionTimeoutMs: Number(env.APPFOLIO_ACTION_TIMEOUT_MS || '30000'),
+    appfolioManualLoginTimeoutMs: Number(env.APPFOLIO_MANUAL_LOGIN_TIMEOUT_MS || '600000'),
     headless: parseBoolean(env.HEADLESS, false),
     slowMo: Number(env.PLAYWRIGHT_SLOW_MO || '80'),
     rawUserDataDir: env.PLAYWRIGHT_USER_DATA_DIR || ONBOARDING_APPFOLIO_PROFILE,
@@ -64,19 +65,18 @@ export async function loginToAppFolio(page, config, {
   }
 
   log('LOGIN_REQUIRED', 'Existing AppFolio session is missing or expired')
-  if (await clickAutofilledLoginIfPresent(page, config, log)) {
-    await waitForLoginOutcome(page, config, { interactive, log })
-    log('LOGIN_SUCCESS', 'AppFolio authenticated session saved in persistent browser profile')
-    return
-  }
-
   if (!username || !password) {
-    await waitForManualLogin(page, config, 'AppFolio login is required, but APPFOLIO_USERNAME or APPFOLIO_PASSWORD is missing.', { interactive, log })
-    return
+    if (await clickAutofilledLoginIfPresent(page, config, log)) {
+      await waitForLoginOutcome(page, config, { interactive, log })
+      log('LOGIN_SUCCESS', 'AppFolio authenticated session saved in persistent browser profile')
+      return
+    }
+    throw new Error('AppFolio login is required, but APPFOLIO_USERNAME or APPFOLIO_PASSWORD is missing.')
   }
 
   await fillLoginField(page, ['email', 'username', 'login'], page.locator('input[type="email"], input[name*="email" i], input[name*="username" i]').first(), username)
   await fillLoginField(page, ['password'], page.locator('input[type="password"]').first(), password)
+  log('LOGIN_CREDENTIALS_FILLED', 'Filled AppFolio username and password from onboarding environment')
   await clickLoginButton(page, config)
   await waitForLoginOutcome(page, config, { interactive, log })
   log('LOGIN_SUCCESS', 'AppFolio authenticated session saved in persistent browser profile')
@@ -135,7 +135,7 @@ async function waitForLoginOutcome(page, config, { interactive, log }) {
     if (/verification|2-step|two-step|mfa|code/i.test(bodyText)) {
       log('MFA_REQUIRED', 'AppFolio requested MFA or verification')
       if (!config.appfolioMfaCode) {
-        await waitForManualLogin(page, config, 'AppFolio requested MFA. Complete verification in the browser.', { interactive, log })
+        await waitForManualLogin(page, config, 'AppFolio requested MFA. Complete verification in the visible browser/noVNC session.', { interactive, log })
         return
       }
       await fillLoginField(page, ['code', 'verification'], page.locator('input').last(), config.appfolioMfaCode)
@@ -152,7 +152,10 @@ async function waitForLoginOutcome(page, config, { interactive, log }) {
 async function waitForManualLogin(page, config, reason, { interactive, log }) {
   log('MANUAL_LOGIN_REQUIRED', reason)
   if (!interactive) {
-    throw new Error(`${reason} Manual login requires an interactive terminal. Run npm run appfolio:onboarding-login on the VPS first.`)
+    log('MANUAL_LOGIN_WAITING', `Waiting up to ${config.appfolioManualLoginTimeoutMs}ms for manual completion in the visible browser/noVNC session`)
+    await waitForAppFolioShell(page, config.appfolioManualLoginTimeoutMs, 'manual login/MFA completion', { diagnose: true, log })
+    log('LOGIN_SUCCESS', 'Manual AppFolio login/MFA completed and the persistent profile is ready')
+    return
   }
 
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout })

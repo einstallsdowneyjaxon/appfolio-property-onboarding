@@ -16,13 +16,18 @@ Production `.env.local` should include:
 
 ```bash
 APPFOLIO_URL=https://thetgpm.appfolio.com
+APPFOLIO_USERNAME=your-onboarding-appfolio-username
+APPFOLIO_PASSWORD=your-onboarding-appfolio-password
 PLAYWRIGHT_USER_DATA_DIR=/root/appfolio-property-onboarding/.playwright-appfolio-profile
 HEADLESS=true
+APPFOLIO_MANUAL_LOGIN_TIMEOUT_MS=600000
 GOOGLE_OAUTH_CLIENT_JSON=/root/appfolio-property-onboarding/client_secret.json
 GOOGLE_OAUTH_TOKEN_PATH=/root/appfolio-property-onboarding/.appfolio-google-token.json
 ```
 
 The property runner fails loudly if the onboarding profile directory is missing or does not look like a Chromium profile. This prevents Playwright from silently creating an empty unauthenticated profile.
+
+During normal HTTP/n8n-triggered onboarding jobs, the bot verifies the existing AppFolio session first. If AppFolio shows the login page, it fills `APPFOLIO_USERNAME` and `APPFOLIO_PASSWORD`, clicks login, waits for MFA only if required, then continues the existing property onboarding workflow after the AppFolio shell is confirmed.
 
 ## First-Time AppFolio Login
 
@@ -73,6 +78,8 @@ DISPLAY=:99 npm run appfolio:onboarding-login
 Complete AppFolio login/MFA in the launched browser. When the AppFolio dashboard/app shell is visible, return to the terminal, type `DONE`, and press Enter. The script closes Chromium cleanly so the profile is saved.
 
 After that, production jobs can run headless through PM2.
+
+If MFA appears during a normal PM2 job, the bot logs `MFA_REQUIRED` and waits up to `APPFOLIO_MANUAL_LOGIN_TIMEOUT_MS` for the AppFolio shell to become available. To complete MFA through noVNC during that window, PM2 must be running the browser on the visible display with `HEADLESS=false` and `DISPLAY=:99`. After the profile is refreshed, switch production back to `HEADLESS=true`.
 
 ### Local Profile Copy Alternative
 
