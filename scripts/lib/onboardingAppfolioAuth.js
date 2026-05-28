@@ -69,6 +69,11 @@ export async function loginToAppFolio(page, config, {
   }
 
   log('LOGIN_REQUIRED', 'Existing AppFolio session is missing or expired')
+  if (await handleExistingMfaScreen(page, config, { interactive, log })) {
+    log('LOGIN_SUCCESS', 'AppFolio authenticated session saved in persistent browser profile')
+    return
+  }
+
   if (!username || !password) {
     if (await clickAutofilledLoginIfPresent(page, config, log)) {
       await waitForLoginOutcome(page, config, { interactive, log })
@@ -84,6 +89,21 @@ export async function loginToAppFolio(page, config, {
   await clickLoginButton(page, config)
   await waitForLoginOutcome(page, config, { interactive, log })
   log('LOGIN_SUCCESS', 'AppFolio authenticated session saved in persistent browser profile')
+}
+
+async function handleExistingMfaScreen(page, config, { interactive, log }) {
+  const bodyText = await page.locator('body').innerText({ timeout: 1000 }).catch(() => '')
+  if (await isMfaChoiceScreen(page, bodyText)) {
+    await requestSmsVerificationCode(page, config, log)
+    await submitMfaCodeOrWait(page, config, { interactive, log })
+    return true
+  }
+  if (isMfaCodeEntryScreen(bodyText)) {
+    log('MFA_REQUIRED', 'AppFolio requested MFA code entry')
+    await submitMfaCodeOrWait(page, config, { interactive, log })
+    return true
+  }
+  return false
 }
 
 export async function waitForAppFolioShell(page, timeout, context, { diagnose = false, log = defaultLog } = {}) {
@@ -136,7 +156,7 @@ async function waitForLoginOutcome(page, config, { interactive, log }) {
   while (Date.now() < deadline) {
     if (await waitForAppFolioShell(page, 1000, 'login outcome', { diagnose: false, log }).catch(() => false)) return
     const bodyText = await page.locator('body').innerText({ timeout: 1000 }).catch(() => '')
-    if (isMfaChoiceScreen(bodyText)) {
+    if (await isMfaChoiceScreen(page, bodyText)) {
       await requestSmsVerificationCode(page, config, log)
       await submitMfaCodeOrWait(page, config, { interactive, log })
       return
@@ -154,27 +174,67 @@ async function waitForLoginOutcome(page, config, { interactive, log }) {
   throw new Error(`AppFolio login did not complete within ${config.appfolioLoginTimeoutMs}ms`)
 }
 
-function isMfaChoiceScreen(bodyText) {
-  return /2-step verification|two-step verification|verification method/i.test(bodyText) &&
-    /receive code via sms|sms/i.test(bodyText) &&
-    /send verification code/i.test(bodyText)
+async function isMfaChoiceScreen(page, bodyText) {
+  const hasMfaChoiceControls = await page.evaluate(() => {
+    const sms = document.querySelector('#method-sms, input[name="twoFactorMethod"][value*="sms" i]')
+    const send = document.querySelector('#send_verification_code, input[name="send_verification_code"]')
+    return Boolean(sms && send)
+  }).catch(() => false)
+  if (hasMfaChoiceControls) return true
+
+  const hasVerificationPrompt = /2-step verification|two-step verification|verification method/i.test(bodyText)
+  const hasSmsOption = /receive code via sms|sms/i.test(bodyText)
+  const hasAlternateDeliveryOption = /receive code via phone call|phone call|call/i.test(bodyText)
+  const hasSendButtonText = /send verification code/i.test(bodyText)
+  return hasVerificationPrompt && hasSmsOption && (hasAlternateDeliveryOption || hasSendButtonText)
+}
+
+function isMfaCodeEntryScreen(bodyText) {
+  return /2-step verification|two-step verification|verification code|enter.*code|mfa/i.test(bodyText) &&
+    !/receive code via sms|receive code via phone call|send verification code/i.test(bodyText)
 }
 
 async function requestSmsVerificationCode(page, config, log) {
   log('MFA_REQUIRED', 'AppFolio requested 2-Step Verification method selection')
   await selectSmsVerificationMethod(page, config, log)
-  const sendButton = await visibleFirst(
-    page.locator('button, a, [role="button"], input[type="submit"]').filter({ hasText: /send verification code/i }).or(page.locator('input[type="submit"][value*="Send Verification Code" i]')),
-    'Send Verification Code button',
-    config.appfolioActionTimeoutMs,
-  )
-  await sendButton.click({ force: true })
+  await clickSendVerificationCode(page, config)
   await page.waitForLoadState('domcontentloaded').catch(() => {})
   await page.waitForTimeout(1000)
   log('MFA_CODE_REQUESTED', 'Clicked Send Verification Code after selecting SMS')
 }
 
+async function clickSendVerificationCode(page, config) {
+  const directButton = page.locator('#send_verification_code, input[name="send_verification_code"]').first()
+  if (await directButton.isVisible({ timeout: 1000 }).catch(() => false)) {
+    await directButton.click({ force: true })
+    return
+  }
+
+  const clicked = await page.evaluate(() => {
+    const controls = Array.from(document.querySelectorAll('button, a, [role="button"], input[type="submit"], input[type="button"]'))
+    const sendControl = controls.find((control) => /send verification code/i.test(`${control.innerText || ''} ${control.textContent || ''} ${control.value || ''} ${control.id || ''} ${control.name || ''}`))
+    if (!sendControl) return false
+    sendControl.click()
+    return true
+  }).catch(() => false)
+  if (clicked) return
+
+  const sendButton = await visibleFirst(
+    page.locator('button, a, [role="button"], input[type="submit"], input[type="button"]').filter({ hasText: /send verification code/i }).or(page.locator('input[value*="Send Verification Code" i]')),
+    'Send Verification Code button',
+    config.appfolioActionTimeoutMs,
+  )
+  await sendButton.click({ force: true })
+}
+
 async function selectSmsVerificationMethod(page, config, log) {
+  const directSmsRadio = page.locator('#method-sms, input[name="twoFactorMethod"][value*="sms" i]').first()
+  if (await directSmsRadio.isVisible({ timeout: 1000 }).catch(() => false)) {
+    if (!(await directSmsRadio.isChecked().catch(() => false))) await directSmsRadio.check({ force: true })
+    log('MFA_SMS_SELECTED', 'Selected SMS verification radio')
+    return
+  }
+
   const smsRadio = page.locator('input[type="radio"]').filter({ hasText: /sms/i }).first()
   if (await smsRadio.isVisible({ timeout: 1000 }).catch(() => false)) {
     if (!(await smsRadio.isChecked().catch(() => false))) await smsRadio.check({ force: true })
