@@ -88,7 +88,7 @@ const COLUMN_ALIASES = {
   propertyType: ['Property Type', 'Listing Type'],
   ownerName: ['Owner Name', 'Owner'],
   managementFee: ['Management Fee'],
-  leaseFee: ['Lease Fee'],
+  leaseFee: ['Lease Fee', 'Leasing Fee', 'Lease Fee Amount', 'Leasing Fee Amount'],
   renewalFee: ['Renewal Fee'],
   maintenanceLimit: ['Maintenance Limit'],
 }
@@ -184,7 +184,28 @@ function normalizeMoneyNumber(value) {
 function feeKind(value) {
   const raw = String(value ?? '').trim()
   if (!raw) return ''
-  return raw.includes('%') ? 'Percent' : 'Flat'
+  const numericValue = Number(raw.replace(/[$,%\s,]/g, ''))
+  if (raw.includes('%')) return 'Percent'
+  if (Number.isFinite(numericValue) && numericValue > 0 && numericValue < 1) return 'Percent'
+  return 'Flat'
+}
+
+function normalizeFeeNumber(value) {
+  const kind = feeKind(value)
+  const normalized = normalizeMoneyNumber(value)
+  const numericValue = Number(normalized)
+  if (kind === 'Percent' && Number.isFinite(numericValue) && numericValue > 0 && numericValue < 1) {
+    return formatNumberForInput(numericValue * 100)
+  }
+  return normalized
+}
+
+function formatNumberForInput(value) {
+  return Number(value.toFixed(6)).toString()
+}
+
+function normalizeDigits(value) {
+  return String(value ?? '').replace(/\D/g, '')
 }
 
 function isYes(value) {
@@ -269,11 +290,11 @@ function normalizeRow(rawRow) {
     ownerName: String(byKey.ownerName ?? '').trim(),
     managementFee: {
       kind: feeKind(byKey.managementFee),
-      value: normalizeMoneyNumber(byKey.managementFee),
+      value: normalizeFeeNumber(byKey.managementFee),
     },
     leaseFee: {
       kind: feeKind(byKey.leaseFee),
-      value: normalizeMoneyNumber(byKey.leaseFee),
+      value: normalizeFeeNumber(byKey.leaseFee),
     },
     renewalFee: normalizeMoneyNumber(byKey.renewalFee),
     maintenanceLimit: normalizeMoneyNumber(byKey.maintenanceLimit),
@@ -295,7 +316,21 @@ async function resolvePayloadRow() {
     const hasSheetColumns = Object.values(COLUMN_ALIASES).some((aliases) => aliases.some((alias) => pick(directRow, [alias]) !== ''))
     if (hasSheetColumns) {
       log('Loaded n8n row payload', source)
-      return normalizeRow(directRow)
+      const normalizedPayloadRow = normalizeRow(directRow)
+      const rowNumber = Number(findRowNumberInPayload(payload))
+      if (Number.isInteger(rowNumber) && rowNumber >= 2) {
+        log('PAYLOAD_ROW_NUMBER_FOUND', `row=${rowNumber}; reading full Property_Onboarding row`)
+        return readPropertyOnboardingRow(rowNumber)
+      }
+      if (rowNeedsSheetFeeLookup(normalizedPayloadRow)) {
+        const sheetRow = await findPropertyOnboardingRowByAddress(normalizedPayloadRow)
+        if (sheetRow) {
+          log('PAYLOAD_ROW_MATCHED_SHEET', `row=${sheetRow.sheetRowNumber} address="${sheetRow.address1}"`)
+          return sheetRow
+        }
+        log('PAYLOAD_ROW_SHEET_MATCH_NOT_FOUND', `address="${normalizedPayloadRow.address1}" zip="${normalizedPayloadRow.zip}"`)
+      }
+      return normalizedPayloadRow
     }
 
     const rowNumber = Number(findRowNumberInPayload(payload))
@@ -411,6 +446,57 @@ async function readIncompletePropertyOnboardingRows() {
 
   log('INCOMPLETE_ROWS_FOUND', String(rows.length))
   return rows
+}
+
+function rowNeedsSheetFeeLookup(row) {
+  return !row?.leaseFee?.kind || !row?.leaseFee?.value || !row?.renewalFee || !row?.managementFee?.kind || !row?.managementFee?.value
+}
+
+async function findPropertyOnboardingRowByAddress(targetRow) {
+  if (!targetRow?.address1) return null
+  log('Reading Google Sheet', `${CONFIG.sheetName} lookup for "${targetRow.address1}"`)
+  const sheets = await getSheetsClient()
+  const response = await sheets.spreadsheets.values.get({
+    spreadsheetId: CONFIG.spreadsheetId,
+    range: `${escapeSheetName(CONFIG.sheetName)}!A:AZ`,
+    valueRenderOption: 'UNFORMATTED_VALUE',
+    dateTimeRenderOption: 'SERIAL_NUMBER',
+  })
+
+  const values = response.data.values || []
+  const header = values[0] || []
+  const matches = []
+  values.slice(1).forEach((row, offset) => {
+    if (!row.some((cell) => String(cell ?? '').trim())) return
+    const rowNumber = offset + 2
+    const normalized = attachRowMetadata(normalizeRow(rowToObject(header, row)), rowNumber)
+    if (rowsReferToSameProperty(normalized, targetRow)) matches.push(normalized)
+  })
+
+  if (matches.length > 1) {
+    log('PAYLOAD_ROW_MULTIPLE_SHEET_MATCHES', matches.map((row) => `row=${row.sheetRowNumber}`).join(', '))
+  }
+  return matches[0] || null
+}
+
+function rowsReferToSameProperty(sheetRow, payloadRow) {
+  const sheetAddress = normalizeLookupText(sheetRow.address1)
+  const payloadAddress = normalizeLookupText(payloadRow.address1)
+  if (!sheetAddress || sheetAddress !== payloadAddress) return false
+
+  const sheetZip = normalizeDigits(sheetRow.zip)
+  const payloadZip = normalizeDigits(payloadRow.zip)
+  if (sheetZip && payloadZip && sheetZip !== payloadZip) return false
+
+  const sheetCity = normalizeLookupText(sheetRow.city)
+  const payloadCity = normalizeLookupText(payloadRow.city)
+  if (sheetCity && payloadCity && sheetCity !== payloadCity) return false
+
+  return true
+}
+
+function normalizeLookupText(value) {
+  return String(value ?? '').trim().replace(/\s+/g, ' ').toLowerCase()
 }
 
 function attachRowMetadata(row, rowNumber) {
@@ -2052,6 +2138,8 @@ async function managementFees(page, row) {
 async function additionalFees(page, row) {
   const sectionName = 'Additional Fees'
   await scrollToSectionHeading(page, sectionName)
+  requireFee(row.leaseFee, 'Lease Fee')
+  requireValue(row.renewalFee, 'Renewal Fee')
   await setRadioOptionNearLabel(page, 'Lease Fee Type', row.leaseFee.kind, { sectionName })
   if (row.leaseFee.kind === 'Percent') {
     await fillNearestFieldWithAliases(page, ['Lease Fee Percent', 'Lease Fee'], row.leaseFee.value, { sectionName })
@@ -2069,6 +2157,18 @@ async function additionalFees(page, row) {
   }
   await verifyRadioOptionNearLabel(page, 'Renewal Fee Type', 'Flat', { sectionName })
   await verifyFieldNearLabelWithAliases(page, ['Renewal Fee Flat', 'Renewal Flat Fee', 'Renewal Fee'], row.renewalFee, { sectionName })
+}
+
+function requireFee(fee, label) {
+  if (!fee?.kind || !fee?.value) {
+    throw new SoftStepError(`Missing required ${label}. Expected a flat amount or percent in the Property_Onboarding row.`)
+  }
+}
+
+function requireValue(value, label) {
+  if (String(value ?? '').trim() === '') {
+    throw new SoftStepError(`Missing required ${label} in the Property_Onboarding row.`)
+  }
 }
 
 async function lateFeePolicy(page) {
