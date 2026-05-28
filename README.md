@@ -102,3 +102,25 @@ Copying a Chromium profile from Windows/macOS to Linux is not the preferred path
 - Do not run onboarding against `/root/appfolio-renewal/.playwright-appfolio-profile`.
 - Google OAuth token/client paths are onboarding-owned runtime files. They are not committed.
 - The onboarding Google auth module reuses an existing saved token and fails if the token/client JSON is missing.
+
+## GitHub Actions Deploy
+
+Pushing to `main` runs `.github/workflows/deploy.yml`. The workflow SSHes into the VPS and runs:
+
+```bash
+cd /root/appfolio-property-onboarding
+git pull
+npm install
+pm2 restart property-onboarding --update-env
+pm2 status
+```
+
+Create these repository secrets in GitHub under `Settings` > `Secrets and variables` > `Actions`:
+
+```text
+VPS_HOST=206.81.13.133
+VPS_USER=root
+VPS_SSH_KEY=<private deploy key contents>
+```
+
+Do not add `.env.local`, private keys, API keys, OAuth tokens, AppFolio credentials, or GetMyMFA credentials to the repository.

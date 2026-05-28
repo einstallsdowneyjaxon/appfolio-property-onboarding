@@ -362,19 +362,31 @@ async function clickAccessLastMfaCode(page, config) {
     const target = normalize(phoneNumber)
     const elements = Array.from(document.querySelectorAll('body *'))
     const phoneElement = elements.find((element) => normalize(element.textContent).includes(target))
-    if (!phoneElement) return false
+    const accessTextElement = elements.find((element) => /^access last mfa code$/i.test((element.textContent || '').trim()))
+    const clickElement = (element) => {
+      if (!element) return false
+      const clickable = element.closest('button, a, [role="button"], input[type="button"], input[type="submit"]') || element
+      clickable.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }))
+      clickable.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window }))
+      clickable.click()
+      return true
+    }
+
+    if (phoneElement && accessTextElement) {
+      const phoneTop = phoneElement.getBoundingClientRect().top
+      const accessTop = accessTextElement.getBoundingClientRect().top
+      if (Math.abs(accessTop - phoneTop) < 300) return clickElement(accessTextElement)
+    }
+    if (!phoneElement) return clickElement(accessTextElement)
 
     let container = phoneElement
-    for (let depth = 0; depth < 6 && container; depth += 1) {
-      const controls = Array.from(container.querySelectorAll('button, a, [role="button"], input[type="button"], input[type="submit"]'))
+    for (let depth = 0; depth < 10 && container; depth += 1) {
+      const controls = Array.from(container.querySelectorAll('button, a, [role="button"], input[type="button"], input[type="submit"], div, span'))
       const accessControl = controls.find((control) => /access last mfa code/i.test(control.innerText || control.textContent || control.value || ''))
-      if (accessControl) {
-        accessControl.click()
-        return true
-      }
+      if (accessControl) return clickElement(accessControl)
       container = container.parentElement
     }
-    return false
+    return clickElement(accessTextElement)
   }, config.getMyMfaPhoneNumber)
 
   if (clicked) {
@@ -383,12 +395,12 @@ async function clickAccessLastMfaCode(page, config) {
     return
   }
 
-  const accessButton = await visibleFirst(
-    page.locator('button, a, [role="button"], input[type="button"], input[type="submit"]').filter({ hasText: /access last mfa code/i }),
-    'Access last MFA code button',
+  const accessTile = await visibleFirst(
+    page.getByText(/access last mfa code/i).or(page.locator('button, a, [role="button"], input[type="button"], input[type="submit"], div, span').filter({ hasText: /access last mfa code/i })),
+    'Access last MFA code action',
     config.appfolioActionTimeoutMs,
   )
-  await accessButton.click({ force: true })
+  await accessTile.click({ force: true })
   await page.waitForLoadState('domcontentloaded').catch(() => {})
   await page.waitForTimeout(1000)
 }
