@@ -305,7 +305,7 @@ async function getMfaCodeFromDashboard(appfolioPage, config, log) {
   try {
     log('GETMYMFA_DASHBOARD_LOGIN_STARTED', `Opening ${config.getMyMfaUrl}`)
     await dashboardPage.goto(config.getMyMfaUrl, { waitUntil: 'domcontentloaded', timeout: config.appfolioActionTimeoutMs })
-    await loginToGetMyMfaDashboard(dashboardPage, config)
+    await loginToGetMyMfaDashboard(dashboardPage, config, log)
     log('GETMYMFA_DASHBOARD_LOGIN_SUCCESS', 'GetMyMFA dashboard loaded')
     await clickAccessLastMfaCode(dashboardPage, config)
     log('GETMYMFA_ACCESS_LAST_CODE_CLICKED', `Clicked Access last MFA code for ${config.getMyMfaPhoneNumber}`)
@@ -313,13 +313,21 @@ async function getMfaCodeFromDashboard(appfolioPage, config, log) {
     log('GETMYMFA_DASHBOARD_CODE_FOUND', 'Read 6-digit MFA code from GetMyMFA dashboard')
     await appfolioPage.bringToFront()
     return code
+  } catch (error) {
+    const bodyText = await dashboardPage.locator('body').innerText({ timeout: 1000 }).catch(() => '')
+    log('GETMYMFA_DASHBOARD_FAILED', `${error.message} url=${dashboardPage.url()} body=${bodyText.slice(0, 300).replace(/\s+/g, ' ')}`)
+    await appfolioPage.bringToFront().catch(() => {})
+    return ''
   } finally {
     await dashboardPage.close().catch(() => {})
   }
 }
 
-async function loginToGetMyMfaDashboard(page, config) {
-  if (await isGetMyMfaDashboardVisible(page).catch(() => false)) return
+async function loginToGetMyMfaDashboard(page, config, log) {
+  if (await isGetMyMfaDashboardVisible(page).catch(() => false)) {
+    log('GETMYMFA_SESSION_REUSED', 'Existing GetMyMFA dashboard session is valid')
+    return
+  }
 
   await fillLoginField(
     page,
@@ -334,7 +342,8 @@ async function loginToGetMyMfaDashboard(page, config) {
 
 async function isGetMyMfaDashboardVisible(page) {
   const bodyText = await page.locator('body').innerText({ timeout: 1000 }).catch(() => '')
-  return /my phone numbers|access last mfa code/i.test(bodyText)
+  if (/my phone numbers|access last mfa code/i.test(bodyText)) return true
+  return page.locator('text=/Access last MFA code/i').first().isVisible({ timeout: 500 }).catch(() => false)
 }
 
 async function waitForGetMyMfaDashboard(page, config) {
@@ -400,10 +409,16 @@ async function readDashboardMfaCode(page, config) {
   while (Date.now() < deadline) {
     const code = await page.evaluate(() => {
       const bodyText = document.body?.innerText || ''
-      const candidates = bodyText.match(/\b\d{6}\b/g) || []
-      return candidates[candidates.length - 1] || ''
+      const contiguousCandidates = bodyText.match(/\b\d{6}\b/g) || []
+      if (contiguousCandidates.length) return contiguousCandidates[contiguousCandidates.length - 1]
+
+      const spacedCandidates = bodyText.match(/(?:\b\d\s+){5}\d\b/g) || []
+      if (spacedCandidates.length) return spacedCandidates[spacedCandidates.length - 1].replace(/\D/g, '')
+
+      return ''
     }).catch(() => '')
-    if (code) return code
+    const normalizedCode = normalizeDigits(code)
+    if (/^\d{6}$/.test(normalizedCode)) return normalizedCode
     await page.waitForTimeout(500)
   }
   throw new Error('Could not find a 6-digit MFA code on GetMyMFA dashboard.')
@@ -453,8 +468,8 @@ async function waitForManualLogin(page, config, reason, { interactive, log }) {
 
 async function fillLoginField(page, labels, fallbackLocator, value) {
   for (const label of labels) {
-    const field = await page.getByLabel(new RegExp(label, 'i')).first().isVisible().then(() => page.getByLabel(new RegExp(label, 'i')).first()).catch(() => null)
-    if (field) {
+    const field = page.getByLabel(new RegExp(label, 'i')).first()
+    if (await field.isVisible({ timeout: 1000 }).catch(() => false)) {
       await replaceInputValue(field, value)
       return
     }
