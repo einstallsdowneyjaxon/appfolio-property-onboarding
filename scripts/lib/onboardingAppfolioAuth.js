@@ -329,15 +329,52 @@ async function loginToGetMyMfaDashboard(page, config, log) {
     return
   }
 
+  await waitForGetMyMfaLoginOrDashboard(page, config, log)
+  if (await isGetMyMfaDashboardVisible(page).catch(() => false)) {
+    log('GETMYMFA_SESSION_REUSED', 'Existing GetMyMFA dashboard session is valid')
+    return
+  }
+
   await fillLoginField(
     page,
     ['email', 'username', 'login'],
-    page.locator('input[type="email"], input[name*="email" i], input[name*="username" i], input[type="text"]').first(),
+    getGetMyMfaUsernameInput(page),
     config.getMyMfaUsername,
+    config.appfolioActionTimeoutMs,
   )
-  await fillLoginField(page, ['password'], page.locator('input[type="password"]').first(), config.getMyMfaPassword)
+  await fillLoginField(page, ['password'], page.locator('input[type="password"]').first(), config.getMyMfaPassword, config.appfolioActionTimeoutMs)
   await clickGetMyMfaSubmit(page, config)
   await waitForGetMyMfaDashboard(page, config)
+}
+
+async function waitForGetMyMfaLoginOrDashboard(page, config, log) {
+  await page.waitForLoadState('domcontentloaded').catch(() => {})
+  await page.waitForLoadState('networkidle', { timeout: Math.min(config.appfolioActionTimeoutMs, 10000) }).catch(() => {})
+
+  const deadline = Date.now() + config.appfolioActionTimeoutMs
+  while (Date.now() < deadline) {
+    if (await isGetMyMfaDashboardVisible(page).catch(() => false)) return
+    const hasLoginInputs = await getGetMyMfaUsernameInput(page).first().isVisible({ timeout: 500 }).catch(() => false) &&
+      await page.locator('input[type="password"]').first().isVisible({ timeout: 500 }).catch(() => false)
+    if (hasLoginInputs) return
+    await page.waitForTimeout(500)
+  }
+
+  const bodyText = await page.locator('body').innerText({ timeout: 1000 }).catch(() => '')
+  log('GETMYMFA_LOGIN_FORM_NOT_READY', `url=${page.url()} body=${bodyText.slice(0, 300).replace(/\s+/g, ' ')}`)
+}
+
+function getGetMyMfaUsernameInput(page) {
+  return page.locator([
+    'input[type="email"]',
+    'input[name*="email" i]',
+    'input[id*="email" i]',
+    'input[name*="user" i]',
+    'input[id*="user" i]',
+    'input[autocomplete="username"]',
+    'input[type="text"]',
+    'input:not([type])',
+  ].join(', ')).first()
 }
 
 async function isGetMyMfaDashboardVisible(page) {
@@ -478,7 +515,7 @@ async function waitForManualLogin(page, config, reason, { interactive, log }) {
   }
 }
 
-async function fillLoginField(page, labels, fallbackLocator, value) {
+async function fillLoginField(page, labels, fallbackLocator, value, timeout = 3000) {
   for (const label of labels) {
     const field = page.getByLabel(new RegExp(label, 'i')).first()
     if (await field.isVisible({ timeout: 1000 }).catch(() => false)) {
@@ -486,7 +523,7 @@ async function fillLoginField(page, labels, fallbackLocator, value) {
       return
     }
   }
-  const fallback = await visibleFirst(fallbackLocator, labels[0], 3000)
+  const fallback = await visibleFirst(fallbackLocator, labels[0], timeout)
   await replaceInputValue(fallback, value)
 }
 
