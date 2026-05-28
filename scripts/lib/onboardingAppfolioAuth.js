@@ -394,7 +394,43 @@ async function waitForGetMyMfaDashboard(page, config) {
 
 async function clickAccessLastMfaCode(page, config) {
   await waitForPhoneNumber(page, config)
-  const clicked = await page.evaluate((phoneNumber) => {
+  const attempts = [
+    () => clickAccessTileByLocator(page),
+    () => clickAccessTileByCoordinates(page),
+    () => clickAccessTileByDom(page, config),
+  ]
+
+  for (const attempt of attempts) {
+    await attempt().catch(() => false)
+    await page.waitForLoadState('domcontentloaded').catch(() => {})
+    await page.waitForTimeout(1200)
+    if (await isGetMyMfaCodePageVisible(page)) return
+  }
+
+  throw new Error('Clicked Access last MFA code but GetMyMFA code page did not open.')
+}
+
+async function clickAccessTileByLocator(page) {
+  const accessTile = await visibleFirst(
+    page.getByText(/access last mfa code/i).or(page.locator('button, a, [role="button"], input[type="button"], input[type="submit"], div, span').filter({ hasText: /access last mfa code/i })),
+    'Access last MFA code action',
+    5000,
+  )
+  await accessTile.click({ force: true })
+  return true
+}
+
+async function clickAccessTileByCoordinates(page) {
+  const box = await page.getByText(/access last mfa code/i).first().boundingBox()
+  if (!box) return false
+  await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2)
+  await page.waitForTimeout(300)
+  await page.mouse.click(box.x + box.width / 2, Math.max(0, box.y - 36))
+  return true
+}
+
+async function clickAccessTileByDom(page, config) {
+  return page.evaluate((phoneNumber) => {
     const normalize = (value) => String(value || '').replace(/\D/g, '')
     const target = normalize(phoneNumber)
     const elements = Array.from(document.querySelectorAll('body *'))
@@ -402,8 +438,11 @@ async function clickAccessLastMfaCode(page, config) {
     const accessTextElement = elements.find((element) => /^access last mfa code$/i.test((element.textContent || '').trim()))
     const clickElement = (element) => {
       if (!element) return false
-      const clickable = element.closest('button, a, [role="button"], input[type="button"], input[type="submit"]') || element
+      const clickable = element.closest('button, a, [role="button"], input[type="button"], input[type="submit"], [onclick]') || element
+      clickable.scrollIntoView({ block: 'center', inline: 'center' })
+      clickable.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, view: window }))
       clickable.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }))
+      clickable.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, cancelable: true, view: window }))
       clickable.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window }))
       clickable.click()
       return true
@@ -412,34 +451,25 @@ async function clickAccessLastMfaCode(page, config) {
     if (phoneElement && accessTextElement) {
       const phoneTop = phoneElement.getBoundingClientRect().top
       const accessTop = accessTextElement.getBoundingClientRect().top
-      if (Math.abs(accessTop - phoneTop) < 300) return clickElement(accessTextElement)
+      if (Math.abs(accessTop - phoneTop) < 300 && clickElement(accessTextElement)) return true
     }
-    if (!phoneElement) return clickElement(accessTextElement)
 
-    let container = phoneElement
-    for (let depth = 0; depth < 10 && container; depth += 1) {
-      const controls = Array.from(container.querySelectorAll('button, a, [role="button"], input[type="button"], input[type="submit"], div, span'))
+    let container = phoneElement || accessTextElement
+    for (let depth = 0; depth < 12 && container; depth += 1) {
+      const controls = Array.from(container.querySelectorAll('button, a, [role="button"], input[type="button"], input[type="submit"], [onclick], div, span'))
       const accessControl = controls.find((control) => /access last mfa code/i.test(control.innerText || control.textContent || control.value || ''))
-      if (accessControl) return clickElement(accessControl)
+      if (clickElement(accessControl)) return true
+      if (/access last mfa code/i.test(container.innerText || container.textContent || '') && clickElement(container)) return true
       container = container.parentElement
     }
+
     return clickElement(accessTextElement)
   }, config.getMyMfaPhoneNumber)
+}
 
-  if (clicked) {
-    await page.waitForLoadState('domcontentloaded').catch(() => {})
-    await page.waitForTimeout(1000)
-    return
-  }
-
-  const accessTile = await visibleFirst(
-    page.getByText(/access last mfa code/i).or(page.locator('button, a, [role="button"], input[type="button"], input[type="submit"], div, span').filter({ hasText: /access last mfa code/i })),
-    'Access last MFA code action',
-    config.appfolioActionTimeoutMs,
-  )
-  await accessTile.click({ force: true })
-  await page.waitForLoadState('domcontentloaded').catch(() => {})
-  await page.waitForTimeout(1000)
+async function isGetMyMfaCodePageVisible(page) {
+  const bodyText = await page.locator('body').innerText({ timeout: 1000 }).catch(() => '')
+  return /last mfa code for/i.test(bodyText) || Boolean(extractSixDigitMfaCode(bodyText))
 }
 
 async function waitForPhoneNumber(page, config) {
@@ -456,21 +486,23 @@ async function waitForPhoneNumber(page, config) {
 async function readDashboardMfaCode(page, config) {
   const deadline = Date.now() + config.appfolioActionTimeoutMs
   while (Date.now() < deadline) {
-    const code = await page.evaluate(() => {
-      const bodyText = document.body?.innerText || ''
-      const contiguousCandidates = bodyText.match(/\b\d{6}\b/g) || []
-      if (contiguousCandidates.length) return contiguousCandidates[contiguousCandidates.length - 1]
-
-      const spacedCandidates = bodyText.match(/(?:\b\d\s+){5}\d\b/g) || []
-      if (spacedCandidates.length) return spacedCandidates[spacedCandidates.length - 1].replace(/\D/g, '')
-
-      return ''
-    }).catch(() => '')
-    const normalizedCode = normalizeDigits(code)
-    if (/^\d{6}$/.test(normalizedCode)) return normalizedCode
+    const bodyText = await page.locator('body').innerText({ timeout: 1000 }).catch(() => '')
+    const code = extractSixDigitMfaCode(bodyText)
+    if (code) return code
     await page.waitForTimeout(500)
   }
   throw new Error('Could not find a 6-digit MFA code on GetMyMFA dashboard.')
+}
+
+function extractSixDigitMfaCode(text) {
+  const value = String(text || '')
+  const contiguousCandidates = value.match(/\b\d{6}\b/g) || []
+  if (contiguousCandidates.length) return contiguousCandidates[contiguousCandidates.length - 1]
+
+  const spacedCandidates = value.match(/(?:\b\d\s+){5}\d\b/g) || []
+  if (spacedCandidates.length) return normalizeDigits(spacedCandidates[spacedCandidates.length - 1])
+
+  return ''
 }
 
 async function clickGetMyMfaSubmit(page, config) {
