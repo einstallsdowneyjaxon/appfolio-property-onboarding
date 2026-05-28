@@ -32,13 +32,13 @@ During normal HTTP/n8n-triggered onboarding jobs, the bot verifies the existing 
 If AppFolio asks how to receive the verification code, onboarding selects SMS and clicks `Send Verification Code`. To automate code entry, set:
 
 ```bash
-GETMYMFA_CODE_URL=https://your-getmymfa-endpoint.example/code
-GETMYMFA_API_KEY=optional-bearer-token
-GETMYMFA_POLL_TIMEOUT_MS=180000
-GETMYMFA_POLL_INTERVAL_MS=5000
+GETMYMFA_URL=https://client.get.mymfa.io/
+GETMYMFA_USERNAME=your-getmymfa-username
+GETMYMFA_PASSWORD=your-getmymfa-password
+GETMYMFA_PHONE_NUMBER=+16266104061
 ```
 
-The GetMyMFA response can be JSON with `code`, `mfaCode`, `otp`, or `token`, or plain text containing the numeric code. If GetMyMFA is not configured or no code is returned, onboarding keeps the manual noVNC fallback.
+When MFA is required, onboarding opens the GetMyMFA dashboard in a second browser tab, logs in, finds the configured phone number under `My phone numbers`, clicks `Access last MFA code`, reads the displayed 6-digit code, returns to AppFolio, submits the code, and confirms the AppFolio shell is loaded. If GetMyMFA dashboard credentials are not configured, onboarding keeps the manual noVNC fallback.
 
 ## First-Time AppFolio Login
 

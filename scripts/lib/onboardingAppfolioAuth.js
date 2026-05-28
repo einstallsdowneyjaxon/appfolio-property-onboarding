@@ -11,10 +11,10 @@ export function getOnboardingAppfolioConfig(rootDir, env = process.env) {
     appfolioLoginTimeoutMs: Number(env.APPFOLIO_LOGIN_TIMEOUT_MS || '60000'),
     appfolioActionTimeoutMs: Number(env.APPFOLIO_ACTION_TIMEOUT_MS || '30000'),
     appfolioManualLoginTimeoutMs: Number(env.APPFOLIO_MANUAL_LOGIN_TIMEOUT_MS || '600000'),
-    getMyMfaCodeUrl: env.GETMYMFA_CODE_URL || '',
-    getMyMfaApiKey: env.GETMYMFA_API_KEY || '',
-    getMyMfaPollTimeoutMs: Number(env.GETMYMFA_POLL_TIMEOUT_MS || '180000'),
-    getMyMfaPollIntervalMs: Number(env.GETMYMFA_POLL_INTERVAL_MS || '5000'),
+    getMyMfaUrl: env.GETMYMFA_URL || 'https://client.get.mymfa.io/',
+    getMyMfaUsername: env.GETMYMFA_USERNAME || '',
+    getMyMfaPassword: env.GETMYMFA_PASSWORD || '',
+    getMyMfaPhoneNumber: env.GETMYMFA_PHONE_NUMBER || '+16266104061',
     headless: parseBoolean(env.HEADLESS, false),
     slowMo: Number(env.PLAYWRIGHT_SLOW_MO || '80'),
     rawUserDataDir: env.PLAYWRIGHT_USER_DATA_DIR || ONBOARDING_APPFOLIO_PROFILE,
@@ -217,69 +217,151 @@ async function selectSmsVerificationMethod(page, config, log) {
 }
 
 async function submitMfaCodeOrWait(page, config, { interactive, log }) {
-  const code = await getConfiguredMfaCode(config, log)
+  const code = await getMfaCodeFromDashboard(page, config, log)
   if (!code) {
     await waitForManualLogin(page, config, 'AppFolio requested MFA. Complete verification in the visible browser/noVNC session.', { interactive, log })
     return
   }
 
   await fillMfaCode(page, config, code)
-  log('MFA_CODE_FILLED', 'Entered verification code')
+  log('MFA_CODE_TYPED', 'Entered verification code into AppFolio')
   await clickLoginButton(page, config)
+  log('MFA_SUBMIT_CLICKED', 'Clicked AppFolio MFA submit button')
   await waitForAppFolioShell(page, config.appfolioLoginTimeoutMs, 'MFA login completion', { diagnose: true, log })
-}
-
-async function getConfiguredMfaCode(config, log) {
-  if (config.getMyMfaCodeUrl) {
-    const code = await pollGetMyMfaCode(config, log)
-    if (code) return code
-  }
-  return config.appfolioMfaCode || ''
-}
-
-async function pollGetMyMfaCode(config, log) {
-  log('GETMYMFA_POLL_STARTED', `Polling GetMyMFA for up to ${config.getMyMfaPollTimeoutMs}ms`)
-  const deadline = Date.now() + config.getMyMfaPollTimeoutMs
-  let lastError = ''
-  while (Date.now() < deadline) {
-    try {
-      const headers = config.getMyMfaApiKey ? { Authorization: `Bearer ${config.getMyMfaApiKey}` } : {}
-      const response = await fetch(config.getMyMfaCodeUrl, { headers })
-      const text = await response.text()
-      if (!response.ok) {
-        lastError = `HTTP ${response.status}: ${text.slice(0, 160)}`
-      } else {
-        const code = extractMfaCode(text)
-        if (code) {
-          log('GETMYMFA_CODE_RECEIVED', 'Received verification code from GetMyMFA')
-          return code
-        }
-      }
-    } catch (error) {
-      lastError = error.message
-    }
-    await new Promise((resolve) => setTimeout(resolve, config.getMyMfaPollIntervalMs))
-  }
-  log('GETMYMFA_POLL_TIMEOUT', lastError || 'No verification code returned')
-  return ''
-}
-
-function extractMfaCode(value) {
-  const text = String(value || '')
-  try {
-    const parsed = JSON.parse(text)
-    const candidates = [parsed.code, parsed.mfaCode, parsed.otp, parsed.token, parsed.data?.code, parsed.data?.otp]
-    const found = candidates.find((candidate) => /^\d{4,10}$/.test(String(candidate || '').trim()))
-    if (found) return String(found).trim()
-  } catch {
-    // Plain-text responses are supported below.
-  }
-  return text.match(/\b\d{4,10}\b/)?.[0] || ''
 }
 
 async function fillMfaCode(page, config, code) {
   const codeInput = page.locator('input[type="text"], input[type="tel"], input[type="number"], input:not([type])').last()
   await fillLoginField(page, ['code', 'verification'], codeInput, code)
+}
+
+async function getMfaCodeFromDashboard(appfolioPage, config, log) {
+  if (!config.getMyMfaUsername || !config.getMyMfaPassword || !config.getMyMfaPhoneNumber) {
+    log('GETMYMFA_DASHBOARD_NOT_CONFIGURED', 'GETMYMFA_USERNAME, GETMYMFA_PASSWORD, or GETMYMFA_PHONE_NUMBER is missing')
+    return ''
+  }
+
+  const dashboardPage = await appfolioPage.context().newPage()
+  try {
+    log('GETMYMFA_DASHBOARD_LOGIN_STARTED', `Opening ${config.getMyMfaUrl}`)
+    await dashboardPage.goto(config.getMyMfaUrl, { waitUntil: 'domcontentloaded', timeout: config.appfolioActionTimeoutMs })
+    await loginToGetMyMfaDashboard(dashboardPage, config)
+    log('GETMYMFA_DASHBOARD_LOGIN_SUCCESS', 'GetMyMFA dashboard loaded')
+    await clickAccessLastMfaCode(dashboardPage, config)
+    log('GETMYMFA_ACCESS_LAST_CODE_CLICKED', `Clicked Access last MFA code for ${config.getMyMfaPhoneNumber}`)
+    const code = await readDashboardMfaCode(dashboardPage, config)
+    log('GETMYMFA_DASHBOARD_CODE_FOUND', 'Read 6-digit MFA code from GetMyMFA dashboard')
+    await appfolioPage.bringToFront()
+    return code
+  } finally {
+    await dashboardPage.close().catch(() => {})
+  }
+}
+
+async function loginToGetMyMfaDashboard(page, config) {
+  if (await isGetMyMfaDashboardVisible(page).catch(() => false)) return
+
+  await fillLoginField(
+    page,
+    ['email', 'username', 'login'],
+    page.locator('input[type="email"], input[name*="email" i], input[name*="username" i], input[type="text"]').first(),
+    config.getMyMfaUsername,
+  )
+  await fillLoginField(page, ['password'], page.locator('input[type="password"]').first(), config.getMyMfaPassword)
+  await clickGetMyMfaSubmit(page, config)
+  await waitForGetMyMfaDashboard(page, config)
+}
+
+async function isGetMyMfaDashboardVisible(page) {
+  const bodyText = await page.locator('body').innerText({ timeout: 1000 }).catch(() => '')
+  return /my phone numbers|access last mfa code/i.test(bodyText)
+}
+
+async function waitForGetMyMfaDashboard(page, config) {
+  const deadline = Date.now() + config.appfolioLoginTimeoutMs
+  while (Date.now() < deadline) {
+    if (await isGetMyMfaDashboardVisible(page)) return
+    await page.waitForTimeout(500)
+  }
+  throw new Error('GetMyMFA dashboard login did not complete before timeout.')
+}
+
+async function clickAccessLastMfaCode(page, config) {
+  await waitForPhoneNumber(page, config)
+  const clicked = await page.evaluate((phoneNumber) => {
+    const normalize = (value) => String(value || '').replace(/\D/g, '')
+    const target = normalize(phoneNumber)
+    const elements = Array.from(document.querySelectorAll('body *'))
+    const phoneElement = elements.find((element) => normalize(element.textContent).includes(target))
+    if (!phoneElement) return false
+
+    let container = phoneElement
+    for (let depth = 0; depth < 6 && container; depth += 1) {
+      const controls = Array.from(container.querySelectorAll('button, a, [role="button"], input[type="button"], input[type="submit"]'))
+      const accessControl = controls.find((control) => /access last mfa code/i.test(control.innerText || control.textContent || control.value || ''))
+      if (accessControl) {
+        accessControl.click()
+        return true
+      }
+      container = container.parentElement
+    }
+    return false
+  }, config.getMyMfaPhoneNumber)
+
+  if (clicked) {
+    await page.waitForLoadState('domcontentloaded').catch(() => {})
+    await page.waitForTimeout(1000)
+    return
+  }
+
+  const accessButton = await visibleFirst(
+    page.locator('button, a, [role="button"], input[type="button"], input[type="submit"]').filter({ hasText: /access last mfa code/i }),
+    'Access last MFA code button',
+    config.appfolioActionTimeoutMs,
+  )
+  await accessButton.click({ force: true })
+  await page.waitForLoadState('domcontentloaded').catch(() => {})
+  await page.waitForTimeout(1000)
+}
+
+async function waitForPhoneNumber(page, config) {
+  const target = normalizeDigits(config.getMyMfaPhoneNumber)
+  const deadline = Date.now() + config.appfolioActionTimeoutMs
+  while (Date.now() < deadline) {
+    const found = await page.evaluate((digits) => document.body?.innerText?.replace(/\D/g, '').includes(digits), target).catch(() => false)
+    if (found) return
+    await page.waitForTimeout(500)
+  }
+  throw new Error(`GetMyMFA phone number was not visible on dashboard: ${config.getMyMfaPhoneNumber}`)
+}
+
+async function readDashboardMfaCode(page, config) {
+  const deadline = Date.now() + config.appfolioActionTimeoutMs
+  while (Date.now() < deadline) {
+    const code = await page.evaluate(() => {
+      const bodyText = document.body?.innerText || ''
+      const candidates = bodyText.match(/\b\d{6}\b/g) || []
+      return candidates[candidates.length - 1] || ''
+    }).catch(() => '')
+    if (code) return code
+    await page.waitForTimeout(500)
+  }
+  throw new Error('Could not find a 6-digit MFA code on GetMyMFA dashboard.')
+}
+
+async function clickGetMyMfaSubmit(page, config) {
+  const button = await visibleFirst(
+    page.locator('button, a, [role="button"], input[type="submit"]').filter({ hasText: /log in|login|sign in|continue|submit/i }).or(page.locator('input[type="submit"]')),
+    'GetMyMFA login button',
+    config.appfolioActionTimeoutMs,
+  )
+  await button.click({ force: true })
+  await page.waitForLoadState('domcontentloaded').catch(() => {})
+  await page.waitForTimeout(1000)
+}
+
+function normalizeDigits(value) {
+  return String(value || '').replace(/\D/g, '')
 }
 
 async function waitForManualLogin(page, config, reason, { interactive, log }) {
